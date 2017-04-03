@@ -1,0 +1,311 @@
+<?php
+
+namespace Caffeinated\Modules\Repositories;
+
+use Illuminate\Config\Repository as Config;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Filesystem\Filesystem;
+use Illuminate\Support\Collection;
+
+class EloquentRepository extends Repository
+{
+    /**
+     * @var Model
+     */
+    protected $model;
+
+    public function __construct(Config $config, Filesystem $files, Model $model)
+    {
+        parent::__construct($config, $files);
+
+        $this->model = $model;
+    }
+
+    /**
+     * Get all modules.
+     *
+     * @return Collection
+     */
+    public function all()
+    {
+        if ($this->config->get('modules.cache')) {
+            return $this->getCache()->sortBy('order');
+        }
+
+        return $this->model->all()->sortBy('order');
+    }
+
+    /**
+     * Get all module slugs.
+     *
+     * @return Collection
+     */
+    public function slugs()
+    {
+        return $this->all()->pluck('slug');
+    }
+
+    /**
+     * Get modules based on where clause.
+     *
+     * @param string $key
+     * @param mixed $value
+     *
+     * @return Collection
+     */
+    public function where($key, $value)
+    {
+        return $this->model->where($key, $value)->first();
+    }
+
+    /**
+     * Sort modules by given key in ascending order.
+     *
+     * @param string $key
+     *
+     * @return Collection
+     */
+    public function sortBy($key)
+    {
+        return $this->all()->sortBy($key);
+    }
+
+    /**
+     * Sort modules by given key in ascending order.
+     *
+     * @param string $key
+     *
+     * @return Collection
+     */
+    public function sortByDesc($key)
+    {
+        return $this->all()->sortByDesc($key);
+    }
+
+    /**
+     * Determines if the given module exists.
+     *
+     * @param string $slug
+     *
+     * @return bool
+     */
+    public function exists($slug)
+    {
+        return $this->slugs()->contains(str_slug($slug));
+    }
+
+    /**
+     * Returns count of all modules.
+     *
+     * @return int
+     */
+    public function count()
+    {
+        return $this->all()->count();
+    }
+
+    /**
+     * Get a module property value.
+     *
+     * @param string $property
+     * @param mixed $default
+     *
+     * @return mixed
+     */
+    public function get($property, $default = null)
+    {
+        return $this->all()->get($property, $default);
+    }
+
+    /**
+     * Set the given module property value.
+     *
+     * @param string $property
+     * @param mixed $value
+     *
+     * @return bool
+     */
+    public function set($property, $value)
+    {
+        list($slug, $key) = explode('::', $property);
+
+        $module = $this->model->where('slug', $slug)->first();
+        $module->$key = $value;
+        $module->save();
+
+        if ($this->config->get('modules.cache')) {
+            $this->optimize();
+        }
+
+    }
+
+    /**
+     * Get all enabled modules.
+     *
+     * @return Collection
+     */
+    public function enabled()
+    {
+        return $this->all()->where('enabled', true);
+    }
+
+    /**
+     * Get all disabled modules.
+     *
+     * @return Collection
+     */
+    public function disabled()
+    {
+        return $this->all()->where('enabled', false);
+    }
+
+    /**
+     * Check if specified module is enabled.
+     *
+     * @param string $slug
+     *
+     * @return bool
+     */
+    public function isEnabled($slug)
+    {
+        $module = $this->model
+            ->where('slug', $slug)
+            ->first();
+
+        return $module->enabled === true;
+    }
+
+    /**
+     * Check if specified module is disabled.
+     *
+     * @param string $slug
+     *
+     * @return bool
+     */
+    public function isDisabled($slug)
+    {
+        $module = $this->model
+            ->where('slug', $slug)
+            ->first();
+
+        return $module->enabled === false;
+    }
+
+    /**
+     * Enables the specified module.
+     *
+     * @param string $slug
+     *
+     * @return bool
+     */
+    public function enable($slug)
+    {
+        return $this->set($slug . '::enabled', true);
+    }
+
+    /**
+     * Disables the specified module.
+     *
+     * @param string $slug
+     *
+     * @return bool
+     */
+    public function disable($slug)
+    {
+        return $this->set($slug . '::enabled', false);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Optimization Methods
+    |--------------------------------------------------------------------------
+    |
+    */
+
+    /**
+     * Update cached repository of module information.
+     *
+     * @return bool
+     */
+    public function optimize()
+    {
+        if ($this->config->get('modules.cache')) {
+            $cachePath = $this->getCachePath();
+
+            $cache = $this->getCache();
+            $basenames = $this->model->all('name');
+            $modules = collect();
+
+            $basenames->each(function ($module, $key) use ($modules, $cache) {
+                $basename = collect(['basename' => $module]);
+                $temp = $basename->merge(collect($cache->get($module)));
+                $manifest = $temp->merge($this->model->where('name', $module)->get());
+
+                $modules->put($module, $manifest);
+            });
+
+            $modules->each(function ($module) {
+                $module->put('id', crc32($module->get('slug')));
+
+                if (!$module->has('enabled')) {
+                    $module->put('enabled', config('modules.enabled', true));
+                }
+
+                if (!$module->has('order')) {
+                    $module->put('order', 9001);
+                }
+
+                return $module;
+            });
+
+            $content = json_encode($modules->all(), JSON_PRETTY_PRINT);
+
+            return $this->files->put($cachePath, $content);
+        }
+
+        return true;
+    }
+
+    /**
+     * Get the contents of the cache file.
+     *
+     * @return Collection
+     */
+    private function getCache()
+    {
+        $cachePath = $this->getCachePath();
+
+        if (!$this->files->exists($cachePath)) {
+            $this->createCache();
+
+            $this->optimize();
+        }
+
+        return collect(json_decode($this->files->get($cachePath), true));
+    }
+
+    /**
+     * Create an empty instance of the cache file.
+     *
+     * @return Collection
+     */
+    private function createCache()
+    {
+        $cachePath = $this->getCachePath();
+        $content = json_encode([], JSON_PRETTY_PRINT);
+
+        $this->files->put($cachePath, $content);
+
+        return collect(json_decode($content, true));
+    }
+
+    /**
+     * Get the path to the cache file.
+     *
+     * @return string
+     */
+    private function getCachePath()
+    {
+        return storage_path('app/modules.json');
+    }
+}

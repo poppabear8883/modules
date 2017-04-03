@@ -71,4 +71,20 @@ return [
         // location as the key and the new location as the value:
         // 'Database/Migrations' => 'src/Database/Migrations',
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Module Caching
+    |--------------------------------------------------------------------------
+    |
+    | Enable caching
+    | When enabled, will generate a modules.json located in storage/app directory.
+    |
+    | When enable, would required to run the 'optimize' method or command
+    | to refresh the cache file.
+    |
+    */
+
+    'cache' => false,
+
 ];
